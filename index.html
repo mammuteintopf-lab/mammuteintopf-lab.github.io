@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pixel Tower Defense</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TowerDefense">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<style>
+  :root{
+    --bg:#1a1a2e; --path:#4a3728; --grass:#2d5a3d; --grass2:#356b48;
+    --ui:#0f0f1e; --accent:#e6c33f; --text:#f0f0f0; --danger:#e64f4f; --hp:#4fe66f;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; margin:0; background:var(--bg); overscroll-behavior:none;}
+  body{
+    display:flex; flex-direction:column; align-items:center;
+    font-family:'Courier New', monospace; color:var(--text); user-select:none;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  h1{font-size:1.1rem; margin:8px 0 4px; letter-spacing:1px; color:var(--accent);}
+  #hud{
+    display:flex; gap:14px; background:var(--ui); padding:6px 14px; border-radius:8px;
+    font-size:0.95rem; margin-bottom:6px; flex-wrap:wrap; justify-content:center;
+  }
+  #hud span b{color:var(--accent);}
+  #wrap{position:relative; width:100%; max-width:480px; touch-action:none;}
+  canvas{width:100%; display:block; image-rendering:pixelated; background:var(--grass); border:3px solid var(--ui); border-radius:6px;}
+  #towerBar{
+    display:flex; gap:8px; margin-top:8px; background:var(--ui); padding:8px; border-radius:8px;
+  }
+  .towerBtn{
+    width:56px; height:56px; border-radius:6px; border:2px solid #444;
+    background:#222; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-size:0.65rem; cursor:pointer;
+  }
+  .towerBtn.selected{border-color:var(--accent); box-shadow:0 0 8px var(--accent);}
+  .towerBtn .icon{width:20px; height:20px; margin-bottom:2px;}
+  #controls{display:flex; gap:10px; margin:10px 0;}
+  button.action{
+    background:var(--accent); color:#1a1a2e; border:none; padding:10px 18px;
+    border-radius:6px; font-weight:bold; font-size:0.9rem; font-family:inherit;
+  }
+  #msg{min-height:1.4rem; font-size:0.9rem; color:var(--danger); margin-top:4px;}
+  #overlay{
+    position:absolute; inset:0; background:rgba(0,0,0,0.75); display:none;
+    align-items:center; justify-content:center; flex-direction:column; border-radius:6px; text-align:center;
+  }
+  #overlay h2{color:var(--accent); margin-bottom:6px;}
+</style>
+</head>
+<body>
+<h1>PIXEL TOWER DEFENSE</h1>
+<div id="hud">
+  <span>💰 <b id="gold">100</b></span>
+  <span>❤️ <b id="lives">10</b></span>
+  <span>🌊 Welle <b id="wave">0</b></span>
+</div>
+<div id="wrap">
+  <canvas id="game" width="240" height="360"></canvas>
+  <div id="overlay"><h2 id="overText"></h2><button class="action" onclick="restart()">Neu starten</button></div>
+</div>
+<div id="towerBar">
+  <div class="towerBtn selected" data-type="basic" onclick="selectTower('basic',this)">
+    <svg class="icon" viewBox="0 0 10 10"><rect width="10" height="10" fill="#5fa8e6"/><rect x="3" y="3" width="4" height="4" fill="#1a1a2e"/></svg>
+    <span>20💰</span>
+  </div>
+  <div class="towerBtn" data-type="strong" onclick="selectTower('strong',this)">
+    <svg class="icon" viewBox="0 0 10 10"><rect width="10" height="10" fill="#e6a83f"/><rect x="3" y="3" width="4" height="4" fill="#1a1a2e"/></svg>
+    <span>50💰</span>
+  </div>
+</div>
+<div id="controls">
+  <button class="action" onclick="startWave()" id="waveBtn">Welle starten</button>
+</div>
+<div id="msg"></div>
+
+<script>
+const CELL=24, COLS=10, ROWS=15;
+const canvas=document.getElementById('game'), ctx=canvas.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+
+// Simple zigzag path (grid coords)
+const pathCells=[];
+(function buildPath(){
+  let x=0,y=1;
+  for(x=0;x<7;x++) pathCells.push([x,y]);
+  for(y=1;y<5;y++) pathCells.push([x,y]);
+  for(x=6;x>=2;x--) pathCells.push([x,y]);
+  for(y=5;y<9;y++) pathCells.push([x,y]);
+  for(x=2;x<9;x++) pathCells.push([x,y]);
+  for(y=9;y<13;y++) pathCells.push([x,y]);
+  for(x=9;x>=1;x--) pathCells.push([x,y]);
+  for(y=13;y<15;y++) pathCells.push([x,y]);
+})();
+const pathSet=new Set(pathCells.map(c=>c[0]+','+c[1]));
+
+const TOWER_TYPES={
+  basic:{cost:20, range:2.6*CELL, dmg:1, rate:600, color:'#5fa8e6'},
+  strong:{cost:50, range:3.2*CELL, dmg:3, rate:900, color:'#e6a83f'}
+};
+
+let gold=100, lives=10, wave=0, selectedType='basic';
+let towers=[], enemies=[], bullets=[], spawning=false, animId=null;
+let lastTime=0;
+
+function selectTower(type, el){
+  selectedType=type;
+  document.querySelectorAll('.towerBtn').forEach(b=>b.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+function cellCenter(gx,gy){ return {x:gx*CELL+CELL/2, y:gy*CELL+CELL/2}; }
+
+canvas.addEventListener('click', e=>{
+  const rect=canvas.getBoundingClientRect();
+  const scale=canvas.width/rect.width;
+  const mx=(e.clientX-rect.left)*scale, my=(e.clientY-rect.top)*scale;
+  const gx=Math.floor(mx/CELL), gy=Math.floor(my/CELL);
+  placeTower(gx,gy);
+});
+
+function placeTower(gx,gy){
+  if(gx<0||gy<0||gx>=COLS||gy>=ROWS) return;
+  const key=gx+','+gy;
+  if(pathSet.has(key)){ showMsg('Nicht auf dem Weg platzierbar!'); return; }
+  if(towers.some(t=>t.gx===gx&&t.gy===gy)){ showMsg('Hier steht schon ein Turm!'); return; }
+  const def=TOWER_TYPES[selectedType];
+  if(gold<def.cost){ showMsg('Nicht genug Gold!'); return; }
+  gold-=def.cost;
+  const c=cellCenter(gx,gy);
+  towers.push({gx,gy,x:c.x,y:c.y,type:selectedType,cooldown:0,...def});
+  updateHUD();
+}
+
+function showMsg(t){ const m=document.getElementById('msg'); m.textContent=t; setTimeout(()=>{ if(m.textContent===t) m.textContent=''; },1500); }
+
+function spawnWave(){
+  wave++;
+  const count=4+wave*2;
+  const hp=6+wave*3;
+  let i=0;
+  spawning=true;
+  const interval=setInterval(()=>{
+    const start=cellCenter(...pathCells[0]);
+    enemies.push({pathIndex:0, x:start.x, y:start.y, hp, maxHp:hp, speed:0.035+wave*0.002, gold:3+Math.floor(wave/2)});
+    i++;
+    if(i>=count){ clearInterval(interval); spawning=false; }
+  }, 500);
+}
+
+function startWave(){
+  if(spawning || enemies.length>0){ showMsg('Welle läuft noch!'); return; }
+  spawnWave();
+  updateHUD();
+}
+
+function moveEnemies(dt){
+  for(let idx=enemies.length-1; idx>=0; idx--){
+    const en=enemies[idx];
+    const target=pathCells[Math.min(en.pathIndex+1, pathCells.length-1)];
+    const tc=cellCenter(...target);
+    const dx=tc.x-en.x, dy=tc.y-en.y;
+    const dist=Math.hypot(dx,dy);
+    const step=en.speed*dt;
+    if(dist<step){
+      en.x=tc.x; en.y=tc.y; en.pathIndex++;
+      if(en.pathIndex>=pathCells.length-1){
+        lives--; enemies.splice(idx,1); updateHUD();
+        if(lives<=0){ endGame(false); return; }
+        continue;
+      }
+    } else {
+      en.x+=dx/dist*step; en.y+=dy/dist*step;
+    }
+  }
+}
+
+function towersFire(dt){
+  for(const t of towers){
+    t.cooldown-=dt;
+    if(t.cooldown>0) continue;
+    let target=null, bestProg=-1;
+    for(const en of enemies){
+      const d=Math.hypot(en.x-t.x, en.y-t.y);
+      if(d<=t.range && en.pathIndex>bestProg){ bestProg=en.pathIndex; target=en; }
+    }
+    if(target){
+      t.cooldown=t.rate;
+      bullets.push({x:t.x,y:t.y,target,dmg:t.dmg,color:t.color});
+    }
+  }
+}
+
+function moveBullets(dt){
+  for(let i=bullets.length-1;i>=0;i--){
+    const b=bullets[i];
+    if(!enemies.includes(b.target)){ bullets.splice(i,1); continue; }
+    const dx=b.target.x-b.x, dy=b.target.y-b.y;
+    const dist=Math.hypot(dx,dy);
+    const step=0.5*dt;
+    if(dist<step){
+      b.target.hp-=b.dmg;
+      if(b.target.hp<=0){
+        gold+=b.target.gold;
+        const ei=enemies.indexOf(b.target);
+        if(ei>=0) enemies.splice(ei,1);
+        updateHUD();
+        if(enemies.length===0 && !spawning) showMsg('Welle '+wave+' geschafft!');
+      }
+      bullets.splice(i,1);
+    } else {
+      b.x+=dx/dist*step; b.y+=dy/dist*step;
+    }
+  }
+}
+
+function draw(){
+  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--grass');
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  // checker grass pattern
+  for(let x=0;x<COLS;x++) for(let y=0;y<ROWS;y++){
+    if((x+y)%2===0){ ctx.fillStyle='#356b48'; ctx.fillRect(x*CELL,y*CELL,CELL,CELL); }
+  }
+  // path
+  ctx.fillStyle='#4a3728';
+  for(const [x,y] of pathCells) ctx.fillRect(x*CELL,y*CELL,CELL,CELL);
+  ctx.fillStyle='#3a2b1e';
+  for(const [x,y] of pathCells){ ctx.fillRect(x*CELL+2,y*CELL+2,CELL-4,CELL-4); }
+
+  // towers
+  for(const t of towers){
+    ctx.fillStyle=t.color;
+    ctx.fillRect(t.gx*CELL+3,t.gy*CELL+3,CELL-6,CELL-6);
+    ctx.fillStyle='#1a1a2e';
+    ctx.fillRect(t.gx*CELL+CELL/2-3,t.gy*CELL+CELL/2-3,6,6);
+  }
+
+  // enemies
+  for(const en of enemies){
+    ctx.fillStyle='#c94f4f';
+    ctx.fillRect(en.x-6,en.y-6,12,12);
+    ctx.fillStyle='#1a1a2e';
+    ctx.fillRect(en.x-6,en.y-9,12,3);
+    ctx.fillStyle='#4fe66f';
+    ctx.fillRect(en.x-6,en.y-9,12*(en.hp/en.maxHp),3);
+  }
+
+  // bullets
+  for(const b of bullets){
+    ctx.fillStyle=b.color;
+    ctx.fillRect(b.x-2,b.y-2,4,4);
+  }
+}
+
+function updateHUD(){
+  document.getElementById('gold').textContent=gold;
+  document.getElementById('lives').textContent=lives;
+  document.getElementById('wave').textContent=wave;
+}
+
+function loop(ts){
+  const dt=Math.min(ts-lastTime,50); lastTime=ts;
+  moveEnemies(dt);
+  towersFire(dt);
+  moveBullets(dt);
+  draw();
+  animId=requestAnimationFrame(loop);
+}
+
+function endGame(win){
+  cancelAnimationFrame(animId);
+  document.getElementById('overText').textContent = win? 'Gewonnen!':'Game Over';
+  document.getElementById('overlay').style.display='flex';
+}
+
+function restart(){
+  gold=100; lives=10; wave=0; towers=[]; enemies=[]; bullets=[]; spawning=false;
+  document.getElementById('overlay').style.display='none';
+  updateHUD();
+  lastTime=performance.now();
+  animId=requestAnimationFrame(loop);
+}
+
+updateHUD();
+requestAnimationFrame(t=>{ lastTime=t; loop(t); });
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('service-worker.js').catch(()=>{});
+  });
+}
+</script>
+</body>
+</html>
